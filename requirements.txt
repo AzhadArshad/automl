@@ -1,0 +1,17 @@
+pandas
+numpy
+scikit-learn
+xgboost
+lightgbm
+catboost
+pytorch-tabnet
+optuna
+mlflow
+shap
+fastapi
+uvicorn
+streamlit
+ydata-profiling
+plotly
+joblib
+python-multipart

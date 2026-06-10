@@ -1,0 +1,65 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# ML artifacts
+*.pkl
+*.joblib
+*.h5
+*.pt
+*.pth
+mlruns/
+mlartifacts/
+optuna.db
+*.db
+
+# Data files (keep schema/sample, not raw data)
+*.csv
+*.parquet
+*.feather
+*.xlsx
+*.json
+!tests/fixtures/*.csv
+
+# Reports
+*.html
+reports/
+
+# SHAP / plot outputs
+*.png
+*.jpg
+*.svg
+shap_plots/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Env vars
+.env
+.env.*
