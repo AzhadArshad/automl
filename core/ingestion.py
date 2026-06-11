@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
+# Set up a logger for this module , helping users understand potential issues with their data during loading and profiling.
 logger = logging.getLogger(__name__)
 
 
@@ -12,17 +13,17 @@ logger = logging.getLogger(__name__)
 class DataProfile:
     """Structured profile of the loaded dataset."""
 
-    df: pd.DataFrame
-    numerical_cols: list[str]
-    categorical_cols: list[str]
-    datetime_cols: list[str]
-    text_cols: list[str]
-    id_cols: list[str]
-    null_summary: dict[str, float]
-    skewness: dict[str, float]
-    cardinality: dict[str, int]
-    n_rows: int
-    n_cols: int
+    df: pd.DataFrame # The raw DataFrame as loaded from CSV
+    numerical_cols: list[str] # List of column names classified as numerical
+    categorical_cols: list[str] # List of column names classified as categorical
+    datetime_cols: list[str] # List of column names classified as datetime
+    text_cols: list[str] # List of column names classified as text
+    id_cols: list[str] # List of column names classified as IDs
+    null_summary: dict[str, float] # Dictionary mapping column names to their null value percentages
+    skewness: dict[str, float] # Dictionary mapping column names to their skewness values
+    cardinality: dict[str, int] # Dictionary mapping column names to their cardinality values
+    n_rows: int # Number of rows in the DataFrame
+    n_cols: int # Number of columns in the DataFrame
     warnings: list[str] = field(default_factory=list)
 
 
@@ -51,6 +52,7 @@ def load_data(path: str) -> DataProfile:
 
     logger.info("Loaded %d rows x %d cols from %s", len(df), len(df.columns), path)
 
+    # Basic profiling and column classification
     numerical_cols: list[str] = []
     categorical_cols: list[str] = []
     datetime_cols: list[str] = []
@@ -61,6 +63,7 @@ def load_data(path: str) -> DataProfile:
     cardinality: dict[str, int] = {}
     warnings: list[str] = []
 
+    # Iterate through columns to classify and compute stats
     for col in df.columns:
         null_pct = df[col].isna().mean()
         null_summary[col] = round(float(null_pct), 4)
