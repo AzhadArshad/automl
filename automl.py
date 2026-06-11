@@ -4,12 +4,10 @@ import logging
 import os
 import pickle
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 import pandas as pd
-from sklearn.datasets import make_classification
-from typing import Callable
 
 logging.basicConfig(
     level=logging.INFO,
@@ -86,6 +84,11 @@ class AutoML:
         self._mlflow_run_id: Optional[str] = None
         self._fit_duration: float = 0.0
         self._target: Optional[str] = None
+        self._classes_: list = []
+        self._class_labels_: list = []
+        # Columns expanded into polynomial features during fit — replayed at
+        # inference so engineered features match training exactly.
+        self._fe_poly_cols: Optional[list] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -129,11 +132,23 @@ class AutoML:
 
         # 2 — Detect task
         self._step("Detecting task type", 10)
-        from core.task_detector import detect_task
+        from core.task_detector import detect_task, TaskType
         self._task_type, self._default_metric = detect_task(self._profile.df, target)
         if self.metric == "auto":
             self.metric = self._default_metric
         logger.info("Task: %s | Metric: %s", self._task_type.value, self.metric)
+
+        # Store class labels for human-readable predictions
+        self._classes_: list = []
+        self._class_labels_: list = []
+        if self._task_type in (TaskType.BINARY, TaskType.MULTICLASS):
+            self._classes_ = sorted(self._profile.df[target].dropna().unique().tolist())
+            # For binary 0/1 targets, derive readable labels from the column name
+            # e.g. target="Survived" → ["Not Survived", "Survived"]
+            if self._task_type == TaskType.BINARY and self._classes_ == [0, 1]:
+                self._class_labels_ = [f"Not {target}", target]
+            else:
+                self._class_labels_ = [str(c) for c in self._classes_]
 
         # 3 — Preprocess
         self._step("Preprocessing", 20)
@@ -164,7 +179,7 @@ class AutoML:
         if self.enable_feature_engineering:
             from core.feature_engineer import run_feature_engineering
             X_df = pd.DataFrame(X, columns=self._feature_names)
-            X_df = run_feature_engineering(
+            X_df, self._fe_poly_cols = run_feature_engineering(
                 X_df,
                 numerical_cols=self._feature_names,
                 categorical_cols=[],
@@ -189,6 +204,9 @@ class AutoML:
             self._leaderboard, zoo, X, y, self._task_type,
             top_n=self.top_n_models,
             n_trials=self.n_optuna_trials,
+            progress_callback=self._progress_callback,
+            start_pct=60,
+            end_pct=75,
         )
 
         # Reconstruct tuned estimators in leaderboard order
@@ -373,11 +391,35 @@ class AutoML:
                 pass
 
     def _transform(self, df: pd.DataFrame) -> np.ndarray:
-        """Apply the stored preprocessing pipeline to a new DataFrame."""
+        """Apply the full preprocessing + feature engineering chain to new data.
+
+        Mirrors exactly what fit() does: datetime expansion → ColumnTransformer
+        → optional polynomial/target-encoding features. This ensures inference
+        always produces the same feature count as training.
+        """
         from core.preprocessor import _extract_datetime_features
+
         dt_cols = [c for c in self._profile.datetime_cols if c in df.columns]
         df_expanded = _extract_datetime_features(df, dt_cols)
-        return self._preprocessor.transform(df_expanded)
+        X = self._preprocessor.transform(df_expanded)
+
+        if self.enable_feature_engineering:
+            from core.feature_engineer import run_feature_engineering
+            X_df = pd.DataFrame(X, columns=self._feature_names[:X.shape[1]])
+            X_df, _ = run_feature_engineering(
+                X_df,
+                numerical_cols=list(X_df.columns),
+                categorical_cols=[],
+                target=pd.Series([0] * len(X_df)),  # dummy target — not used at inference
+                enable=True,
+                # Replay the exact columns chosen during fit — ranking by
+                # correlation is impossible here (no target) and would pick
+                # different columns, silently corrupting predictions.
+                poly_cols=self._fe_poly_cols or [],
+            )
+            return X_df.values
+
+        return X
 
 
 # ---------------------------------------------------------------------------

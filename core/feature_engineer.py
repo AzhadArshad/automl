@@ -41,7 +41,8 @@ def add_polynomial_features(
     numerical_cols: list[str],
     target: pd.Series,
     degree: int = 2,
-) -> pd.DataFrame:
+    poly_cols: list[str] | None = None,
+) -> tuple[pd.DataFrame, list[str]]:
     """Add degree-2 polynomial interaction terms for the top correlated numerical columns.
 
     Args:
@@ -49,16 +50,23 @@ def add_polynomial_features(
         numerical_cols: All numerical column names in df.
         target: Target series (used only to rank correlations).
         degree: Polynomial degree (default 2).
+        poly_cols: If given, expand exactly these columns instead of ranking by
+            correlation. Used at inference so the engineered features match
+            training exactly (the target is not available then).
 
     Returns:
-        DataFrame with new polynomial columns appended (originals kept).
+        Tuple of (DataFrame with new polynomial columns appended, list of
+        columns that were expanded — pass back in as poly_cols at inference).
     """
-    if not numerical_cols:
-        return df
+    if poly_cols is not None:
+        top_cols = [c for c in poly_cols if c in df.columns]
+    else:
+        if not numerical_cols:
+            return df, []
+        top_cols = _top_correlated_numericals(df, numerical_cols, target, _TOP_N_POLY)
 
-    top_cols = _top_correlated_numericals(df, numerical_cols, target, _TOP_N_POLY)
     if not top_cols:
-        return df
+        return df, []
 
     try:
         poly = PolynomialFeatures(degree=degree, include_bias=False, interaction_only=False)
@@ -74,8 +82,9 @@ def add_polynomial_features(
         logger.info("Added %d polynomial features from top-%d numerical cols.", len(new_cols), _TOP_N_POLY)
     except Exception as exc:
         logger.warning("Polynomial feature generation failed: %s", exc)
+        return df, []
 
-    return df
+    return df, top_cols
 
 
 def add_target_encoding(
@@ -124,7 +133,8 @@ def run_feature_engineering(
     categorical_cols: list[str],
     target: pd.Series,
     enable: bool = True,
-) -> pd.DataFrame:
+    poly_cols: list[str] | None = None,
+) -> tuple[pd.DataFrame, list[str]]:
     """Run all optional feature engineering steps.
 
     Args:
@@ -133,13 +143,15 @@ def run_feature_engineering(
         categorical_cols: Categorical column names.
         target: Target series.
         enable: If False, returns df unchanged (no-op).
+        poly_cols: Columns to expand polynomially (inference). None means
+            rank by target correlation (training).
 
     Returns:
-        Augmented DataFrame (or original if enable=False).
+        Tuple of (augmented DataFrame, columns used for polynomial features).
     """
     if not enable:
-        return df
+        return df, []
 
-    df = add_polynomial_features(df, numerical_cols, target)
+    df, used_poly_cols = add_polynomial_features(df, numerical_cols, target, poly_cols=poly_cols)
     df = add_target_encoding(df, categorical_cols, target)
-    return df
+    return df, used_poly_cols

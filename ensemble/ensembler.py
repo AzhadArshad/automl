@@ -52,7 +52,12 @@ class EnsembleResult:
 
         if self.task_type == TaskType.REGRESSION:
             return blended
-        return (blended >= 0.5).astype(int) if blended.ndim == 1 else np.argmax(blended, axis=1)
+
+        idx = (blended >= 0.5).astype(int) if blended.ndim == 1 else np.argmax(blended, axis=1)
+        classes = getattr(self.base_models[0], "classes_", None)
+        if classes is not None:
+            return np.asarray(classes)[idx]
+        return idx
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         """Return probability estimates for classification tasks.
@@ -75,8 +80,15 @@ class EnsembleResult:
         probas = self._collect_probas_or_preds(X)
 
         if self.strategy == "simple":
-            return np.mean(probas, axis=0)
-        return np.average(probas, axis=0, weights=self.weights)
+            blended = np.mean(probas, axis=0)
+        else:
+            blended = np.average(probas, axis=0, weights=self.weights)
+
+        # Binary blending keeps only the positive-class column — expand back
+        # to the standard (n_samples, 2) predict_proba contract.
+        if blended.ndim == 1:
+            return np.column_stack([1.0 - blended, blended])
+        return blended
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -229,6 +241,10 @@ def build_ensemble(
     )
 
     weights = np.array(cv_scores, dtype=float)
+    if task_type == TaskType.REGRESSION:
+        # Regression scores are RMSE (lower = better) — invert so better
+        # models get larger weights in the blend.
+        weights = 1.0 / np.clip(weights, 1e-9, None)
 
     if strategy in ("simple", "weighted"):
         # Fit every base model on the full training set

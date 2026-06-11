@@ -143,6 +143,9 @@ def train_all(
     if not valid:
         raise RuntimeError("All models failed during cross-validation. Check your data.")
 
+    # Regression scores are RMSE (lower = better) after the sign flip above,
+    # so the leaderboard must sort ascending for those tasks.
+    ascending = task_type in _NEGATE
     leaderboard = pd.DataFrame(
         {
             "Model": [r.name for r in valid],
@@ -150,7 +153,7 @@ def train_all(
             "Std": [r.cv_std for r in valid],
             "Fit Time (s)": [r.fit_time for r in valid],
         }
-    ).sort_values("CV Score", ascending=False).reset_index(drop=True)
+    ).sort_values("CV Score", ascending=ascending).reset_index(drop=True)
 
     logger.info("Leaderboard:\n%s", leaderboard.to_string(index=False))
     return leaderboard

@@ -206,6 +206,7 @@ def tune_model(
     task_type: TaskType,
     n_trials: int = 50,
     n_splits: int = 5,
+    trial_callback=None,
 ) -> TuningResult:
     """Run Optuna hyperparameter search for one model.
 
@@ -216,6 +217,8 @@ def tune_model(
         task_type: Task type for scorer and CV strategy selection.
         n_trials: Number of Optuna trials (default 50).
         n_splits: CV folds per trial (default 5).
+        trial_callback: Optional callable(trial_number, n_trials) called after
+            each completed trial. Used for live progress reporting.
 
     Returns:
         TuningResult with best_params and best_score.
@@ -233,12 +236,16 @@ def tune_model(
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             scores = cross_val_score(model, X, y, cv=cv, scoring=scorer, n_jobs=1)
-        score = float(scores.mean())
-        # Optuna always maximises; flip negated scorers
-        return -score if task_type in _NEGATE else score
+        # neg_root_mean_squared_error is already "higher = better" — return it
+        # as-is so direction="maximize" minimises RMSE.
+        return float(scores.mean())
+
+    def _on_trial_end(study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
+        if trial_callback is not None:
+            trial_callback(trial.number + 1, n_trials)
 
     study = optuna.create_study(direction="maximize")
-    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False, callbacks=[_on_trial_end])
 
     best_score = study.best_value
     if task_type in _NEGATE:
@@ -265,6 +272,9 @@ def tune_top_models(
     task_type: TaskType,
     top_n: int = 3,
     n_trials: int = 50,
+    progress_callback=None,
+    start_pct: int = 60,
+    end_pct: int = 75,
 ) -> dict[str, TuningResult]:
     """Tune the top-N models from the leaderboard.
 
@@ -278,23 +288,52 @@ def tune_top_models(
         task_type: Task type.
         top_n: How many top models to tune (default 3).
         n_trials: Optuna trials per model (default 50).
+        progress_callback: Optional callable(msg, pct) for live UI progress.
+            Fires after every Optuna trial so the progress bar moves smoothly.
+        start_pct: Progress % at the start of tuning (default 60).
+        end_pct: Progress % at the end of tuning (default 75).
 
     Returns:
         Dict of {model_name: TuningResult} for successfully tuned models.
     """
-    import pandas as pd
-
     top_names = leaderboard["Model"].head(top_n).tolist()
     logger.info("Tuning top-%d models: %s", top_n, top_names)
 
+    total_trials = top_n * n_trials
+    completed_trials = 0
+    pct_range = end_pct - start_pct
+
     results: dict[str, TuningResult] = {}
-    for name in top_names:
+    for model_idx, name in enumerate(top_names):
+        if progress_callback:
+            progress_callback(
+                f"Tuning {name} (model {model_idx + 1}/{top_n})",
+                start_pct + int((completed_trials / max(total_trials, 1)) * pct_range),
+            )
+
+        def _trial_cb(trial_num: int, _n_trials: int, _name=name, _model_idx=model_idx) -> None:
+            nonlocal completed_trials
+            completed_trials += 1
+            if progress_callback:
+                pct = start_pct + int((completed_trials / max(total_trials, 1)) * pct_range)
+                progress_callback(
+                    f"Tuning {_name} — trial {trial_num}/{_n_trials} "
+                    f"(model {_model_idx + 1}/{top_n})",
+                    pct,
+                )
+
         try:
-            result = tune_model(name, X, y, task_type, n_trials=n_trials)
+            result = tune_model(
+                name, X, y, task_type,
+                n_trials=n_trials,
+                trial_callback=_trial_cb,
+            )
             results[name] = result
         except ValueError as exc:
             logger.warning("Skipping tuning for '%s': %s", name, exc)
+            completed_trials += n_trials  # advance counter so % stays correct
         except Exception as exc:
             logger.warning("Tuning failed for '%s': %s", name, exc)
+            completed_trials += n_trials
 
     return results

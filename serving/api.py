@@ -43,6 +43,9 @@ class JobState:
         self.model: Any = None               # fitted EnsembleResult
         self.preprocessor: Any = None        # fitted ColumnTransformer
         self.explainer_result: Any = None    # ExplainerResult
+        self.aml: Any = None                 # fitted AutoML instance (for full transform chain)
+        self.classes: list = []              # original target class labels (classification only)
+        self.class_labels: list = []         # human-readable label for each class
 
 
 _jobs: dict[str, JobState] = {}
@@ -104,6 +107,7 @@ def _run_training(job_id: str, csv_bytes: bytes, config: TrainConfig) -> None:
         state.progress = pct
         logger.info("[%s] %d%% — %s", job_id, pct, msg)
 
+    tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
             tmp.write(csv_bytes)
@@ -119,13 +123,15 @@ def _run_training(job_id: str, csv_bytes: bytes, config: TrainConfig) -> None:
             progress_callback=_on_progress,
         )
         aml.fit(tmp_path, config.target)
-        os.unlink(tmp_path)
 
         # Pull results out of the fitted AutoML object
+        state.aml              = aml
         state.model            = aml._ensemble
         state.preprocessor     = aml._preprocessor
         state.feature_names    = aml._feature_names
         state.task_type        = aml._task_type.value
+        state.classes          = aml._classes_
+        state.class_labels     = aml._class_labels_
         state.leaderboard      = aml.leaderboard().to_dict(orient="records")
         state.explainer_result = aml._explainer_result
         state.status           = "done"
@@ -134,6 +140,9 @@ def _run_training(job_id: str, csv_bytes: bytes, config: TrainConfig) -> None:
         logger.exception("Training job %s failed: %s", job_id, exc)
         state.status = "failed"
         state.error = str(exc)
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -211,12 +220,30 @@ def predict(request: PredictRequest):
     X = _preprocess_input(row_df, state)
 
     prediction = state.model.predict(X)[0]
-    result: dict[str, Any] = {"prediction": _json_safe(prediction)}
+    pred_value = _json_safe(prediction)
+
+    classes      = state.classes or []
+    class_labels = state.class_labels or [str(c) for c in classes]
+
+    # Decode numeric prediction to human-readable label where possible
+    pred_label = pred_value
+    decoded = False
+    if classes and pred_value in classes:
+        idx = classes.index(pred_value)
+        pred_label = class_labels[idx]
+        decoded = pred_label != str(pred_value)  # only flag as decoded if label actually changed
+
+    result: dict[str, Any] = {"prediction": pred_label}
+    if decoded:
+        result["raw_prediction"] = pred_value   # only include when label was changed
 
     if state.task_type != "regression":
         try:
             proba = state.model.predict_proba(X)[0]
-            result["probabilities"] = [round(float(p), 4) for p in proba]
+            result["probabilities"] = {
+                label: round(float(p), 4)
+                for label, p in zip(class_labels, proba)
+            }
         except Exception:
             pass
 
@@ -301,17 +328,21 @@ def _require_done(state: JobState) -> None:
 
 
 def _preprocess_input(df: pd.DataFrame, state: JobState) -> np.ndarray:
-    """Apply the stored preprocessing pipeline to a new DataFrame.
+    """Apply the full preprocessing + feature engineering chain to a new DataFrame.
+
+    Uses aml._transform() so that feature engineering (polynomial features,
+    target encoding) is applied in the same way as during training — preventing
+    the feature count mismatch that occurs when only the ColumnTransformer is used.
 
     Args:
-        df: Raw input DataFrame (from /predict or /predict/batch).
-        state: JobState containing the fitted preprocessor.
+        df: Raw input DataFrame (same columns as training, minus target).
+        state: JobState containing the fitted AutoML instance.
 
     Returns:
         Transformed numpy array ready for model inference.
     """
     try:
-        return state.preprocessor.transform(df)
+        return state.aml._transform(df)
     except Exception as exc:
         raise HTTPException(
             status_code=422,

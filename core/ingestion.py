@@ -71,10 +71,13 @@ def load_data(path: str) -> DataProfile:
         cardinality[col] = int(n_unique)
         unique_ratio = n_unique / len(df)
 
-        # Try parsing object columns as datetime before anything else
+        # Try parsing object columns as datetime before anything else.
+        # errors="coerce" turns unparseable values into NaT so the 80%
+        # threshold below actually decides — with errors="raise" a single
+        # bad value would disqualify the whole column.
         if df[col].dtype == object:
             try:
-                parsed = pd.to_datetime(df[col], infer_datetime_format=True)
+                parsed = pd.to_datetime(df[col], errors="coerce")
                 if parsed.notna().mean() > 0.8:
                     df[col] = parsed
                     datetime_cols.append(col)

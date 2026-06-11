@@ -204,10 +204,9 @@ if st.session_state.training_done:
                         result = pred_resp.json()
                         st.metric("Prediction", result["prediction"])
                         if "probabilities" in result:
-                            proba = result["probabilities"]
                             st.write("**Class probabilities:**")
-                            for i, p in enumerate(proba):
-                                st.progress(p, text=f"Class {i}: {p:.1%}")
+                            for label, p in result["probabilities"].items():
+                                st.progress(float(p), text=f"{label}: {float(p):.1%}")
                     else:
                         st.error(f"Prediction failed: {pred_resp.text}")
 
