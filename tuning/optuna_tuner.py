@@ -157,7 +157,7 @@ def _build_model(model_name: str, params: dict, task_type: TaskType):
     if model_name == "CatBoost":
         from catboost import CatBoostClassifier, CatBoostRegressor
         cls = CatBoostClassifier if is_clf else CatBoostRegressor
-        return cls(verbose=0, random_state=42, **params)
+        return cls(verbose=0, allow_writing_files=False, random_state=42, **params)
 
     if model_name == "RandomForest":
         from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor

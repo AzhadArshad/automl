@@ -31,7 +31,7 @@ for key, default in [
 with st.sidebar:
     st.header("Configuration")
     top_n_models     = st.slider("Top N models to tune", 1, 8, 3)
-    n_optuna_trials  = st.slider("Optuna trials per model", 10, 100, 50)
+    n_optuna_trials  = st.slider("Optuna trials per model", 5, 100, 15)
     ensemble_strategy = st.selectbox("Ensemble strategy", ["weighted", "simple", "stacking"])
     enable_fe        = st.checkbox("Enable feature engineering", value=True)
     time_limit       = st.number_input("Time limit (s)", min_value=60, max_value=3600, value=300)

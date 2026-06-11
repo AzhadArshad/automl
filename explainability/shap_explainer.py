@@ -10,6 +10,9 @@ import shap
 
 logger = logging.getLogger(__name__)
 
+# Silence SHAP's own verbose internal logger
+logging.getLogger("shap").setLevel(logging.WARNING)
+
 # Tree-based model class names that support TreeExplainer (fast)
 _TREE_MODEL_CLASSES = (
     "XGBClassifier", "XGBRegressor",
@@ -23,7 +26,7 @@ _TREE_MODEL_CLASSES = (
 # Max background samples for KernelExplainer (slow fallback)
 _KERNEL_BACKGROUND_SAMPLES = 100
 # Max rows to compute SHAP values on (keeps it fast for large datasets)
-_MAX_EXPLAIN_ROWS = 500
+_MAX_EXPLAIN_ROWS = 100
 
 
 @dataclass
@@ -88,13 +91,17 @@ def _compute_shap_values(explainer, X: np.ndarray) -> np.ndarray:
     """
     values = explainer.shap_values(X)
 
-    # Multiclass: list of arrays, one per class → take class 1 or mean abs
+    # List of arrays (older SHAP API): one array per class
     if isinstance(values, list):
         if len(values) == 2:
-            # Binary: index 1 is positive class
-            return values[1]
-        # Multiclass: average absolute values across classes
+            return values[1]   # binary: positive class
         return np.mean(np.abs(np.stack(values, axis=0)), axis=0)
+
+    # 3D array (newer KernelExplainer with predict_proba): (n_samples, n_features, n_classes)
+    if isinstance(values, np.ndarray) and values.ndim == 3:
+        if values.shape[2] == 2:
+            return values[:, :, 1]   # binary: positive class
+        return np.abs(values).mean(axis=2)
 
     return values
 

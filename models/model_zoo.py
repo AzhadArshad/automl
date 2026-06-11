@@ -67,6 +67,7 @@ def get_models(n_rows: int, task_type: TaskType) -> dict:
             iterations=300,
             learning_rate=0.05,
             verbose=0,
+            allow_writing_files=False,
             random_state=42,
         )
         models["MLP"] = MLPClassifier(
@@ -100,6 +101,7 @@ def get_models(n_rows: int, task_type: TaskType) -> dict:
             iterations=300,
             learning_rate=0.05,
             verbose=0,
+            allow_writing_files=False,
             random_state=42,
         )
         models["MLP"] = MLPRegressor(

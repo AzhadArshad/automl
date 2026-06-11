@@ -65,11 +65,22 @@ def _evaluate_one(
     else:
         cv = KFold(n_splits=n_splits, shuffle=True, random_state=42)
 
+    # Force single-threaded inner parallelism to avoid deadlock with joblib's thread pool
+    if hasattr(model, "n_jobs"):
+        model.set_params(n_jobs=1)
+
     try:
         t0 = time.perf_counter()
+
+        # TabNet's PyTorch training loop hangs inside joblib threads on macOS — skip CV
+        if type(model).__name__ in ("TabNetClassifier", "TabNetRegressor"):
+            logger.info("%-20s  skipped CV (TabNet — PyTorch incompatible with joblib threads)", name)
+            return None
+
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             scores = cross_val_score(model, X, y, cv=cv, scoring=scorer, n_jobs=1)
+
         elapsed = time.perf_counter() - t0
 
         # Flip sign for negated scorers so the leaderboard always shows higher = better
@@ -91,6 +102,8 @@ def _evaluate_one(
     except Exception as exc:
         logger.warning("Model '%s' failed during CV and was skipped: %s", name, exc)
         return None
+
+
 
 
 def train_all(

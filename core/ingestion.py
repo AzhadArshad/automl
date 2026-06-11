@@ -87,7 +87,9 @@ def load_data(path: str) -> DataProfile:
             continue
 
         if pd.api.types.is_numeric_dtype(df[col]):
-            if unique_ratio > 0.95 and n_unique > 10:
+            # Only flag integer columns as potential IDs — floats are continuous features
+            is_integer_col = pd.api.types.is_integer_dtype(df[col])
+            if is_integer_col and unique_ratio > 0.95 and n_unique > 10:
                 id_cols.append(col)
                 warnings.append(
                     f"Column '{col}' looks like an ID (unique ratio={unique_ratio:.2f}). Consider dropping it."

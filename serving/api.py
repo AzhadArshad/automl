@@ -77,142 +77,63 @@ class BatchPredictResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 def _run_training(job_id: str, csv_bytes: bytes, config: TrainConfig) -> None:
-    """Full AutoML pipeline executed as a background task.
+    """Thin background task — delegates entirely to AutoML.fit().
 
-    Updates JobState.progress and JobState.current_step at each stage so
-    the /status endpoint can report live progress to the UI.
+    Writes the CSV to a temp file, wires a progress callback into the
+    AutoML instance so JobState updates in real time, then pulls results
+    out of the fitted AutoML object.
 
     Args:
         job_id: Unique identifier for this job.
         csv_bytes: Raw CSV file content.
         config: Training configuration from the client.
     """
+    import tempfile
+    import sys
+    import os
+
+    # Add project root to path so AutoML can be imported inside the worker
+    sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+    from automl import AutoML
+
     state = _jobs[job_id]
     state.status = "running"
 
-    def _step(msg: str, pct: int) -> None:
+    def _on_progress(msg: str, pct: int) -> None:
         state.current_step = msg
         state.progress = pct
         logger.info("[%s] %d%% — %s", job_id, pct, msg)
 
     try:
-        import tempfile, os
-        from core.ingestion import load_data
-        from core.task_detector import detect_task
-        from core.preprocessor import fit_preprocessor
-        from core.feature_engineer import run_feature_engineering
-        from models.model_zoo import get_models
-        from models.trainer import train_all
-        from tuning.optuna_tuner import tune_top_models, _build_model
-        from ensemble.ensembler import build_ensemble
-        from explainability.shap_explainer import explain
-
-        # 1 — Ingest
-        _step("Ingesting data", 5)
         with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
             tmp.write(csv_bytes)
             tmp_path = tmp.name
-        profile = load_data(tmp_path)
+
+        aml = AutoML(
+            time_limit=config.time_limit,
+            metric=config.metric,
+            top_n_models=config.top_n_models,
+            enable_feature_engineering=config.enable_feature_engineering,
+            ensemble_strategy=config.ensemble_strategy,
+            n_optuna_trials=config.n_optuna_trials,
+            progress_callback=_on_progress,
+        )
+        aml.fit(tmp_path, config.target)
         os.unlink(tmp_path)
 
-        # 2 — Detect task
-        _step("Detecting task type", 10)
-        task_type, metric = detect_task(profile.df, config.target)
-        state.task_type = task_type.value
-
-        # 3 — Prepare features / target
-        _step("Preprocessing", 20)
-        feature_cols = [
-            c for c in profile.df.columns
-            if c != config.target and c not in profile.id_cols
-        ]
-        X_raw = profile.df[feature_cols].copy()
-        y = profile.df[config.target].values
-
-        num_cols   = [c for c in profile.numerical_cols   if c in feature_cols]
-        cat_cols   = [c for c in profile.categorical_cols if c in feature_cols]
-        dt_cols    = [c for c in profile.datetime_cols    if c in feature_cols]
-
-        prep_result = fit_preprocessor(
-            X_raw, num_cols, cat_cols, dt_cols, profile.cardinality
-        )
-        state.preprocessor = prep_result.pipeline
-        state.feature_names = prep_result.feature_names
-
-        X = prep_result.pipeline.transform(
-            _apply_datetime_expansion(X_raw, dt_cols)
-        )
-
-        # 4 — Feature engineering (optional)
-        _step("Feature engineering", 30)
-        if config.enable_feature_engineering:
-            X_df = pd.DataFrame(X, columns=prep_result.feature_names)
-            X_df = run_feature_engineering(
-                X_df, prep_result.feature_names, [], pd.Series(y),
-                enable=True
-            )
-            X = X_df.values
-            state.feature_names = list(X_df.columns)
-
-        # 5 — Train baseline models
-        _step("Training models (cross-validation)", 40)
-        zoo = get_models(profile.n_rows, task_type)
-        leaderboard = train_all(zoo, X, y, task_type)
-        state.leaderboard = leaderboard.to_dict(orient="records")
-
-        # 6 — Tune top models
-        _step("Tuning hyperparameters (Optuna)", 60)
-        tuning_results = tune_top_models(
-            leaderboard, zoo, X, y, task_type,
-            top_n=config.top_n_models,
-            n_trials=config.n_optuna_trials,
-        )
-
-        # Build tuned estimators
-        top_names = leaderboard["Model"].head(config.top_n_models).tolist()
-        top_estimators = []
-        top_scores = []
-        for name in top_names:
-            params = tuning_results[name].best_params if name in tuning_results else {}
-            est = _build_model(name, params, task_type)
-            top_estimators.append(est)
-            score = (
-                tuning_results[name].best_score
-                if name in tuning_results
-                else leaderboard.loc[leaderboard["Model"] == name, "CV Score"].values[0]
-            )
-            top_scores.append(float(score))
-
-        # 7 — Ensemble
-        _step("Building ensemble", 75)
-        ensemble = build_ensemble(
-            top_estimators, top_scores, X, y, task_type,
-            strategy=config.ensemble_strategy,
-        )
-        state.model = ensemble
-
-        # 8 — Explain
-        _step("Computing SHAP explanations", 88)
-        exp_result = explain(
-            ensemble.base_models[0],   # explain the best single model
-            X,
-            state.feature_names,
-        )
-        state.explainer_result = exp_result
-
-        _step("Done", 100)
-        state.status = "done"
+        # Pull results out of the fitted AutoML object
+        state.model            = aml._ensemble
+        state.preprocessor     = aml._preprocessor
+        state.feature_names    = aml._feature_names
+        state.task_type        = aml._task_type.value
+        state.leaderboard      = aml.leaderboard().to_dict(orient="records")
+        state.explainer_result = aml._explainer_result
+        state.status           = "done"
 
     except Exception as exc:
         logger.exception("Training job %s failed: %s", job_id, exc)
         state.status = "failed"
         state.error = str(exc)
-
-
-def _apply_datetime_expansion(df: pd.DataFrame, datetime_cols: list[str]) -> pd.DataFrame:
-    """Expand datetime columns to calendar features before passing to the preprocessor."""
-    from core.preprocessor import _extract_datetime_features
-    return _extract_datetime_features(df, datetime_cols)
 
 
 # ---------------------------------------------------------------------------
