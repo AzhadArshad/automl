@@ -12,7 +12,7 @@ pinned: false
 
 Upload any tabular CSV, pick a target column, and get a tuned, explained, ready-to-download ML model — no code required.
 
-**Live demo:** [huggingface.co/spaces/AzhadArshad/automl](https://huggingface.co/spaces/AzhadArshad/automl)
+**Live demo:** [huggingface.co/spaces/Aju360/automl](https://huggingface.co/spaces/Aju360/automl)
 
 ## What it does
 
