@@ -1,3 +1,13 @@
+---
+title: AutoML
+emoji: 🤖
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # AutoML — README to be written in Phase 4
 
 # Plan to be edited out later

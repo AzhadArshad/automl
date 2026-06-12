@@ -40,6 +40,7 @@ class JobState:
         self.leaderboard: list[dict] = []
         self.feature_names: list[str] = []
         self.task_type: str = ""
+        self.metric: str = ""                # resolved evaluation metric (e.g. roc_auc, rmse)
         self.model: Any = None               # fitted EnsembleResult
         self.preprocessor: Any = None        # fitted ColumnTransformer
         self.explainer_result: Any = None    # ExplainerResult
@@ -49,6 +50,16 @@ class JobState:
 
 
 _jobs: dict[str, JobState] = {}
+
+# Guards for public deployment — keep one CPU-heavy job at a time and
+# reject uploads big enough to peg the box for an hour.
+_MAX_UPLOAD_BYTES = 20 * 1024 * 1024   # 20 MB
+_MAX_UPLOAD_ROWS = 50_000
+_MAX_UPLOAD_COLS = 1_000
+# How many finished jobs to keep in memory — each one holds a fitted ensemble
+# and SHAP values, so an unbounded store is a slow memory leak on a long-lived
+# deployment.
+_MAX_FINISHED_JOBS = 3
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +141,7 @@ def _run_training(job_id: str, csv_bytes: bytes, config: TrainConfig) -> None:
         state.preprocessor     = aml._preprocessor
         state.feature_names    = aml._feature_names
         state.task_type        = aml._task_type.value
+        state.metric           = aml.metric
         state.classes          = aml._classes_
         state.class_labels     = aml._class_labels_
         state.leaderboard      = aml.leaderboard().to_dict(orient="records")
@@ -165,10 +177,47 @@ async def train(
 
     Returns a job_id immediately. Poll /status/{job_id} for progress.
     """
+    csv_bytes = await file.read()
+    if len(csv_bytes) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large (max {_MAX_UPLOAD_BYTES // (1024 * 1024)} MB).",
+        )
+    n_rows = csv_bytes.count(b"\n")
+    if n_rows > _MAX_UPLOAD_ROWS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Too many rows (~{n_rows:,}; max {_MAX_UPLOAD_ROWS:,}).",
+        )
+    n_cols = csv_bytes.split(b"\n", 1)[0].count(b",") + 1
+    if n_cols > _MAX_UPLOAD_COLS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Too many columns (~{n_cols:,}; max {_MAX_UPLOAD_COLS:,}).",
+        )
+
+    # Clamp tuning effort server-side — the UI slider caps at 50, but direct
+    # API callers could otherwise request unbounded CPU time.
+    n_optuna_trials = max(1, min(n_optuna_trials, 50))
+    top_n_models = max(1, min(top_n_models, 8))
+
+    # Busy check + job insert must stay in one synchronous block (no awaits
+    # between them): the event loop can interleave another /train request at
+    # any await point, letting two jobs slip past the one-at-a-time guard.
+    if any(s.status in ("queued", "running") for s in _jobs.values()):
+        raise HTTPException(
+            status_code=429,
+            detail="A training job is already running — please try again in a few minutes.",
+        )
+
+    # Evict the oldest finished jobs (dicts preserve insertion order) so a
+    # long-lived deployment doesn't accumulate fitted models in memory.
+    finished = [jid for jid, s in _jobs.items() if s.status in ("done", "failed")]
+    while len(finished) >= _MAX_FINISHED_JOBS:
+        del _jobs[finished.pop(0)]
+
     job_id = str(uuid.uuid4())
     _jobs[job_id] = JobState()
-
-    csv_bytes = await file.read()
     config = TrainConfig(
         target=target,
         time_limit=time_limit,
@@ -201,7 +250,12 @@ def status(job_id: str):
 def leaderboard(job_id: str):
     """Return the sorted model leaderboard for a completed (or in-progress) job."""
     state = _get_job(job_id)
-    return {"job_id": job_id, "leaderboard": state.leaderboard}
+    return {
+        "job_id": job_id,
+        "leaderboard": state.leaderboard,
+        "task_type": state.task_type,
+        "metric": state.metric,
+    }
 
 
 @app.post("/predict")
@@ -257,6 +311,11 @@ async def predict_batch(job_id: str = Form(...), file: UploadFile = File(...)):
     _require_done(state)
 
     csv_bytes = await file.read()
+    if len(csv_bytes) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large (max {_MAX_UPLOAD_BYTES // (1024 * 1024)} MB).",
+        )
     df = pd.read_csv(io.BytesIO(csv_bytes))
     X = _preprocess_input(df, state)
 
@@ -292,18 +351,32 @@ def explain_endpoint(job_id: str):
 
 @app.get("/export/{job_id}")
 def export_model(job_id: str):
-    """Download the fitted ensemble model as a .pkl file."""
+    """Download the full fitted pipeline as a .pkl file.
+
+    Exports the fitted AutoML instance — preprocessing, feature engineering,
+    and ensemble together — so `.predict(raw_df)` works on unprocessed data.
+    The training dataset is stripped out before pickling. Unpickling requires
+    this project's source code on the Python path.
+    """
+    import copy
+
     state = _get_job(job_id)
     _require_done(state)
 
+    aml = copy.copy(state.aml)
+    aml._progress_callback = None      # request-local closure — not picklable
+    profile = copy.copy(aml._profile)
+    profile.df = pd.DataFrame()        # don't ship the user's training data
+    aml._profile = profile
+
     buf = io.BytesIO()
-    pickle.dump(state.model, buf)
+    pickle.dump(aml, buf)
     buf.seek(0)
 
     return StreamingResponse(
         buf,
         media_type="application/octet-stream",
-        headers={"Content-Disposition": f"attachment; filename={job_id}_model.pkl"},
+        headers={"Content-Disposition": "attachment; filename=automl_pipeline.pkl"},
     )
 
 

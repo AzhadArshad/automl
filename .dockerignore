@@ -1,0 +1,17 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.git/
+mlruns/
+mlartifacts/
+mlflow.db
+outputs/
+shap_plots/
+*.pkl
+*.html
+*.png
+*.csv
+.DS_Store
+.vscode/
+.idea/

@@ -45,6 +45,7 @@ reports/
 *.jpg
 *.svg
 shap_plots/
+outputs/
 
 # Logs
 *.log
